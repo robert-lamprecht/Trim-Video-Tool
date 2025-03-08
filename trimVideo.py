@@ -8,6 +8,16 @@ import cv2
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import os
 import subprocess  # Add this import at the top
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class Segment:
+    start: int
+    end: int
+    
+    def duration(self):
+        return self.end - self.start
 
 class VideoTrimmer(QMainWindow):
     def __init__(self):
@@ -21,6 +31,7 @@ class VideoTrimmer(QMainWindow):
         self.start_time = 0
         self.end_time = 0
         self.current_time = 0
+        self.segments: List[Segment] = []
 
         # Create main widget and layout
         main_widget = QWidget()
@@ -67,6 +78,14 @@ class VideoTrimmer(QMainWindow):
         self.select_button.clicked.connect(self.select_video)
         controls_layout.addWidget(self.select_button)
 
+        self.add_segment_button = QPushButton("Add Segment")
+        self.add_segment_button.clicked.connect(self.add_current_segment)
+        controls_layout.addWidget(self.add_segment_button)
+        
+        self.clear_segments_button = QPushButton("Clear Segments")
+        self.clear_segments_button.clicked.connect(self.clear_segments)
+        controls_layout.addWidget(self.clear_segments_button)
+
         layout.addLayout(controls_layout)
 
         # Create sliders
@@ -91,6 +110,10 @@ class VideoTrimmer(QMainWindow):
         slider_layout.addLayout(end_layout)
 
         layout.addLayout(slider_layout)
+
+        # Add segments list display
+        self.segments_list = QLabel("Selected Segments:\nNone")
+        layout.addWidget(self.segments_list)
 
         # Save button
         self.save_button = QPushButton("Save Trimmed Video")
@@ -143,10 +166,13 @@ class VideoTrimmer(QMainWindow):
         self.start_label.setText(f"Start Time: {self.format_time(self.start_time)}")
         self.update_duration_label()
         
-        # Update video position if it's before start time
-        current_pos = self.media_player.position() // 1000
-        if current_pos < self.start_time:
-            self.media_player.setPosition(self.start_time * 1000)
+        # Update video position when slider moves
+        self.media_player.setPosition(self.start_time * 1000)
+        
+        # If video is playing, pause it while sliding
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+            self.play_button.setText("Play")
 
     def update_end_time(self):
         self.end_time = self.end_slider.value()
@@ -155,6 +181,14 @@ class VideoTrimmer(QMainWindow):
             self.end_slider.setValue(self.end_time)
         self.end_label.setText(f"End Time: {self.format_time(self.end_time)}")
         self.update_duration_label()
+        
+        # Update video position when slider moves
+        self.media_player.setPosition(self.end_time * 1000)
+        
+        # If video is playing, pause it while sliding
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+            self.play_button.setText("Play")
 
     def update_duration_label(self):
         duration = self.end_time - self.start_time
@@ -178,65 +212,65 @@ class VideoTrimmer(QMainWindow):
             self.play_button.setText("Pause")
 
     def save_video(self):
-        if not self.video_path:
+        if not self.video_path or not self.segments:
             return
 
         # Generate default output filename
         file_dir = os.path.dirname(self.video_path)
         file_name, file_extension = os.path.splitext(os.path.basename(self.video_path))
-        default_name = f"{file_name}_trimmed{file_extension}"
+        default_name = f"{file_name}_combined{file_extension}"
         default_path = os.path.join(file_dir, default_name)
 
-        # Open save file dialog with default name
         output_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Trimmed Video",
-            default_path,  # Set default path with suggested filename
+            "Save Combined Video",
+            default_path,
             "Video Files (*.mp4 *.avi *.mov *.mkv)"
         )
         
-        if not output_path:  # User cancelled
+        if not output_path:
             return
 
         try:
-            # Show a "Processing..." label
             processing_label = QLabel("Processing video... Please wait.", self)
             processing_label.setStyleSheet("background-color: rgba(0,0,0,0.7); color: white; padding: 20px;")
             processing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             processing_label.setGeometry(self.width()//2 - 100, self.height()//2 - 25, 200, 50)
             processing_label.show()
-            
-            # Update the GUI
             QApplication.processEvents()
 
-            # Use FFmpeg to trim the video (fast copy method)
+            # Create temporary file for segment list
+            with open('segments.txt', 'w') as f:
+                for segment in self.segments:
+                    duration = segment.end - segment.start
+                    f.write(f"file '{self.video_path}'\n")
+                    f.write(f"inpoint {segment.start}\n")
+                    f.write(f"outpoint {segment.end}\n")
+
+            # Use FFmpeg to concatenate segments
             command = [
-                'ffmpeg', '-y',  # -y to overwrite output file if it exists
-                '-i', self.video_path,  # input file
-                '-ss', str(self.start_time),  # start time
-                '-t', str(self.end_time - self.start_time),  # duration
-                '-c', 'copy',  # copy streams without re-encoding
+                'ffmpeg', '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', 'segments.txt',
+                '-c', 'copy',
                 output_path
             ]
             
-            # Run FFmpeg command
             result = subprocess.run(command, capture_output=True, text=True)
+            
+            # Clean up temporary file
+            os.remove('segments.txt')
             
             if result.returncode != 0:
                 raise Exception(f"FFmpeg error: {result.stderr}")
             
-            # Hide the processing label
             processing_label.hide()
-            
-            # Show success message
-            QMessageBox.information(self, "Success", "Video trimmed successfully!")
+            QMessageBox.information(self, "Success", "Video segments combined successfully!")
             
         except Exception as e:
-            # Hide the processing label if there's an error
             if 'processing_label' in locals():
                 processing_label.hide()
-            
-            # Show error message
             QMessageBox.critical(self, "Error", f"An error occurred while saving the video:\n{str(e)}")
 
     # Add this new method to handle media player errors
@@ -274,6 +308,32 @@ class VideoTrimmer(QMainWindow):
         new_speed = self.speeds[self.current_speed_idx]
         self.speed_button.setText(f"{new_speed}x")
         self.media_player.setPlaybackRate(new_speed)
+
+    def add_current_segment(self):
+        if self.start_time >= self.end_time:
+            QMessageBox.warning(self, "Invalid Segment", "Start time must be before end time")
+            return
+            
+        new_segment = Segment(self.start_time, self.end_time)
+        self.segments.append(new_segment)
+        self.update_segments_display()
+        
+    def clear_segments(self):
+        self.segments.clear()
+        self.update_segments_display()
+        
+    def update_segments_display(self):
+        if not self.segments:
+            self.segments_list.setText("Selected Segments:\nNone")
+            return
+            
+        segments_text = "Selected Segments:\n"
+        total_duration = 0
+        for i, seg in enumerate(self.segments, 1):
+            segments_text += f"{i}. {self.format_time(seg.start)} - {self.format_time(seg.end)} (Duration: {self.format_time(seg.duration())})\n"
+            total_duration += seg.duration()
+        segments_text += f"\nTotal Duration: {self.format_time(total_duration)}"
+        self.segments_list.setText(segments_text)
 
 def main():
     app = QApplication(sys.argv)
